@@ -1,470 +1,358 @@
-from dataclasses import dataclass
-from random import Random
-
 import numpy as np
+import random
+import matplotlib.pyplot as plt
+import time
+from queue import Queue
+from threading import Thread
+from fastapi import FastAPI
+import uvicorn
+from pydantic import BaseModel
+from typing import Optional
 
+"""
+My World
+2d grid
+empty cells - 0
+walls - 1 
+energy -2
+players - 100+
+"""
 
-EMPTY = 0
-WALL = 1
-ENERGY = 2
-FIRST_AGENT_ID = 100
+class Action(BaseModel):
+    world_id: int
+    player_id : int
+    action_type : str
+    direction : Optional[str] = None
 
+class SignUpRequest(BaseModel):
+    name: str
 
-@dataclass(frozen=True)
-class Position:
-    x: int
-    y: int
-
-
-@dataclass
-class AgentState:
-    agent_id: int
-    position: Position
-    energy: int = 0
-    facing: str = "up"
-
-
-@dataclass(frozen=True)
-class AgentAction:
-    agent_id: int
-    action: str
-    direction: str | None = None
-
-
-@dataclass(frozen=True)
-class ActionResult:
-    success: bool
-    message: str
-    agent_state: AgentState
-    vision: list["VisionCell"]
-
-
-@dataclass(frozen=True)
-class VisionCell:
-    x: int
-    y: int
-    dx: int
-    dy: int
-    value: int
-
-
-class World:
-    """A simple 2D grid world containing walls and energy deposits."""
-
+class Player():
+    def __init__(self, name, player_id, energy, location):
+        self.player_id = player_id
+        self.name = name
+        self.energy = energy
+        self.location = location
+    
+class World():
     def __init__(
-        self,
-        width: int = 100,
-        height: int = 100,
-        wall_count: int = 250,
-        energy_count: int = 100,
-        seed: int | None = None,
-        border_walls: bool = True,
-        wall_seed_chance: float = 0.35,
-    ) -> None:
-        if width <= 0 or height <= 0:
-            raise ValueError("World dimensions must be positive.")
+            self, size=100, num_seed_walls=100, max_wall_length=10, num_energy=50, num_players=5, starting_energy=40, tick_rate_hz=10
+        ):
+        self.size=size
+        self.num_seed_walls=num_seed_walls
+        self.max_wall_length=max_wall_length
+        self.num_energy=num_energy
+        self.num_players=num_players
+        self.starting_energy=starting_energy
+        self.tick_rate_hz=tick_rate_hz
+        self.directions = {
+            "up":[1,0],
+            "down":[-1,0],
+            "left":[0,-1],
+            "right":[0,1]
+        }
+        self.map = np.zeros((size,size))
+        self.players = {}
+        self.next_player_id = 100
+        self.display_gui = None
+        self.action_queue = Queue()
+        self.running = False
+        self.lobby_ready = False
 
-        self.width = width
-        self.height = height
-        self.random = Random(seed)
-        self.grid = np.full((height, width), EMPTY, dtype=np.int32)
-        self.agents: dict[int, AgentState] = {}
-        self.next_agent_id = FIRST_AGENT_ID
+        Thread(target=self.update_world_loop, daemon=True).start()
+        
+    def _init_map(self, size=100):
+        self.map = np.zeros((size,size))
 
-        if border_walls:
-            self._add_border_walls()
+    def _get_wall_direction(self, prev_direction = None, change_chance = 0.25):
+            directions = [
+                [0,1],    
+                [0,-1],    
+                [1,0],    
+                [-1,0]
+            ]
+            if prev_direction is None:
+                return random.choice(directions)
 
-        self.add_random_walls(wall_count, seed_chance=wall_seed_chance)
-        self.add_random_energy(energy_count)
+            if random.random() > change_chance:
+                return prev_direction
 
-    def _add_border_walls(self) -> None:
-        self.grid[0, :] = WALL
-        self.grid[-1, :] = WALL
-        self.grid[:, 0] = WALL
-        self.grid[:, -1] = WALL
+            valid_directions = [
+                dir for dir in directions
+                if not(dir[0] + prev_direction[0] == 0 and dir[1] + prev_direction[1] == 0)
+            ]            
+            return random.choice(valid_directions)
 
-    def add_wall(self, x: int, y: int) -> None:
-        self._validate_position(x, y)
-        if self._is_agent_id(self.grid[y, x]):
-            raise ValueError("Cannot place a wall on an agent.")
-        self.grid[y, x] = WALL
-
-    def add_energy(self, x: int, y: int) -> None:
-        self._validate_position(x, y)
-        if self.grid[y, x] == WALL:
-            raise ValueError("Cannot place energy on a wall.")
-        if self._is_agent_id(self.grid[y, x]):
-            raise ValueError("Cannot place energy on an agent.")
-        self.grid[y, x] = ENERGY
-
-    def add_agent(self, x: int | None = None, y: int | None = None) -> AgentState:
-        if x is None or y is None:
-            if x is not None or y is not None:
-                raise ValueError("Both x and y are required when placing an agent manually.")
-
-            position = self._random_empty_positions(1)[0]
-        else:
-            self._validate_position(x, y)
-            position = Position(x=x, y=y)
-            if self.grid[y, x] != EMPTY:
-                raise ValueError("Agents can only be placed on empty cells.")
-
-        agent_id = self.next_agent_id
-        self.next_agent_id += 1
-
-        agent_state = AgentState(agent_id=agent_id, position=position)
-        self.agents[agent_id] = agent_state
-        self.grid[position.y, position.x] = agent_id
-        return agent_state
-
-    def add_random_agents(self, count: int) -> list[AgentState]:
-        if count < 0:
-            raise ValueError("Count cannot be negative.")
-
-        return [self.add_agent() for _ in range(count)]
-
-    def apply_agent_action(self, request: AgentAction | dict) -> ActionResult:
-        action = self._parse_agent_action(request)
-        agent_state = self._get_agent_state(action.agent_id)
-
-        if action.action == "move":
-            return self._move_agent(agent_state, action.direction)
-
-        raise ValueError(f"Unknown agent action: {action.action}")
-
-    def add_random_walls(self, count: int, seed_chance: float = 0.35) -> None:
-        self.add_connected_walls(count, seed_chance=seed_chance)
-
-    def add_connected_walls(
-        self,
-        count: int,
-        min_segment_length: int = 4,
-        max_segment_length: int = 14,
-        turn_chance: float = 0.25,
-        seed_chance: float = 0.35,
-    ) -> None:
-        """Grow connected wall segments instead of placing isolated wall dots."""
-        if count < 0:
-            raise ValueError("Count cannot be negative.")
-        if min_segment_length <= 0 or max_segment_length < min_segment_length:
-            raise ValueError("Wall segment lengths must be positive and ordered.")
-        if not 0 <= turn_chance <= 1:
-            raise ValueError("Turn chance must be between 0 and 1.")
-        if not 0 <= seed_chance <= 1:
-            raise ValueError("Seed chance must be between 0 and 1.")
-
-        empty_cells = np.argwhere(self.grid == EMPTY)
-        if count > len(empty_cells):
-            raise ValueError("Not enough empty cells available.")
-
-        placed = 0
-        attempts = 0
-        max_attempts = max(count * 20, 100)
-        directions = [(1, 0), (-1, 0), (0, 1), (0, -1)]
-
-        while placed < count and attempts < max_attempts:
-            attempts += 1
-            start_new_cluster = placed == 0 or self.random.random() < seed_chance
-            current = self._wall_growth_start(start_new_cluster=start_new_cluster)
-            if current is None:
+    def _init_walls(self, num_seed_walls=10, max_wall_length=10):
+        # place seed walls
+        seed_walls = []
+        count = 0
+        tries = 0
+        while count < num_seed_walls:
+            if tries > 10:
+                print("Error placing more walls")
                 break
 
-            dx, dy = self.random.choice(directions)
-            segment_length = self.random.randint(min_segment_length, max_segment_length)
+            x = random.randint(0,self.size-1)
+            y = random.randint(0,self.size-1)
+            if self.is_empty(self.map[x][y]):
+                self.map[x][y] = 1
+                seed_walls.append((x,y))
+                count += 1
+                tries = 0
+            else:
+                tries += 1
 
-            for _ in range(segment_length):
-                if placed >= count:
+        # place wall growths
+        # iterate over all seed walls and grow outwards
+        change_chance = 0.15
+        for x, y in seed_walls:
+            direction = self._get_wall_direction(change_chance=change_chance)
+            for _ in range(max_wall_length):
+                direction = self._get_wall_direction(
+                    prev_direction=direction, change_chance=change_chance
+                )
+                x += direction[0]
+                y += direction[1]
+                if x < 0 or x > self.size-1:
                     break
-                if self.grid[current.y, current.x] != EMPTY:
+                elif y < 0 or y > self.size-1:
+                    break
+                if self.is_empty(self.map[x][y]):
+                    self.map[x][y] = 1
+                else:
                     break
 
-                self.grid[current.y, current.x] = WALL
-                placed += 1
+    def _init_energy(self, num_energy=50):
+        count = 0
+        tries = 0 
+        while count < num_energy:
+            if tries > 10:
+                print("Error placing more energy")
+                break
 
-                if self.random.random() < turn_chance:
-                    dx, dy = self.random.choice(directions)
+            x = random.randint(0,self.size-1)
+            y = random.randint(0,self.size-1)
+            if self.is_empty(self.map[x][y]):
+                self.map[x][y] = 2
+                count += 1
+                tries = 0 
+            else:
+                tries += 1
 
-                next_position = self._next_wall_position(current, dx, dy)
-                if next_position is None:
-                    break
-                current = next_position
+    def _init_players(self):
+        tries = 0
+        for player_id in self.players.keys():
+            if tries > 10:
+                print("Error placing more players")
+                break
 
-        if placed < count:
-            raise ValueError("Could not place all connected walls.")
+            x = random.randint(0,self.size-1)
+            y = random.randint(0,self.size-1)
+            if self.is_empty(self.map[x][y]):
+                self.players[player_id].location = (x,y)
+                self.map[x][y] = player_id
+                tries = 0
+            else:
+                tries += 1
 
-    def add_random_energy(self, count: int) -> None:
-        for position in self._random_empty_positions(count):
-            self.grid[position.y, position.x] = ENERGY
+    def _get_rgb_map(self):
+        rgb_map = np.zeros((self.size,self.size,3), dtype=int)
 
-    def is_wall(self, x: int, y: int) -> bool:
-        self._validate_position(x, y)
-        return self.grid[y, x] == WALL
+        for i in range(self.size):
+            for j in range(self.size):
+                cell_value = self.map[i][j]
+                if cell_value == 0: # empty
+                    rgb_map[i][j][0] = 255
+                    rgb_map[i][j][1] = 255
+                    rgb_map[i][j][2] = 255
+                elif cell_value == 1: # wall
+                    rgb_map[i][j][0] = 0
+                    rgb_map[i][j][1] = 0
+                    rgb_map[i][j][2] = 0
+                elif cell_value == 2: # energy
+                    rgb_map[i][j][0] = 0
+                    rgb_map[i][j][1] = 255
+                    rgb_map[i][j][2] = 0
+                elif cell_value >= 100: # player
+                    rgb_map[i][j][0] = 0
+                    rgb_map[i][j][1] = 0
+                    rgb_map[i][j][2] = 255
 
-    def has_energy(self, x: int, y: int) -> bool:
-        self._validate_position(x, y)
-        return self.grid[y, x] == ENERGY
+        return rgb_map
 
-    def collect_energy(self, x: int, y: int) -> bool:
-        self._validate_position(x, y)
-        if self.grid[y, x] != ENERGY:
-            return False
-
-        self.grid[y, x] = EMPTY
-        return True
-
-    def visualize(self, show: bool = True, ax=None):
-        """Draw the world grid with matplotlib and return the figure and axes."""
-        if not show and ax is None:
-            import matplotlib
-
-            matplotlib.use("Agg", force=True)
-
-        import matplotlib.pyplot as plt
-        from matplotlib.colors import BoundaryNorm, ListedColormap
-        from matplotlib.patches import Patch
-
-        if ax is None:
-            figure, ax = plt.subplots()
-        else:
-            figure = ax.figure
-
-        display_grid = self.grid.copy()
-        display_grid[display_grid >= FIRST_AGENT_ID] = 3
-
-        cmap = ListedColormap(["white", "black", "limegreen", "dodgerblue"])
-        norm = BoundaryNorm([-0.5, 0.5, 1.5, 2.5, 3.5], cmap.N)
-
-        ax.imshow(display_grid, cmap=cmap, norm=norm, origin="upper")
-        ax.set_title("World")
-        ax.set_aspect("equal")
-        ax.set_xticks(np.arange(-0.5, self.width, 1), minor=True)
-        ax.set_yticks(np.arange(-0.5, self.height, 1), minor=True)
-        ax.set_xticks([])
-        ax.set_yticks([])
-        ax.grid(which="minor", color="lightgray", linewidth=0.5)
-        ax.tick_params(which="minor", bottom=False, left=False)
-
-        legend_items = [
-            Patch(facecolor="white", edgecolor="black", label="Empty"),
-            Patch(facecolor="black", edgecolor="black", label="Wall"),
-            Patch(facecolor="limegreen", edgecolor="black", label="Energy"),
-            Patch(facecolor="dodgerblue", edgecolor="black", label="Agent"),
-        ]
-        ax.legend(handles=legend_items, loc="upper right", bbox_to_anchor=(1.25, 1.0))
-
-        for agent in self.agents.values():
-            ax.text(
-                agent.position.x,
-                agent.position.y,
-                str(agent.agent_id),
-                color="white",
-                ha="center",
-                va="center",
-                fontsize=7,
-            )
-
-        if show:
-            plt.show()
-
-        return figure, ax
-
-    def _parse_agent_action(self, request: AgentAction | dict) -> AgentAction:
-        if isinstance(request, AgentAction):
-            return request
-
-        try:
-            return AgentAction(
-                agent_id=int(request["agent_id"]),
-                action=str(request["action"]).lower(),
-                direction=request.get("direction"),
-            )
-        except KeyError as exc:
-            raise ValueError(f"Agent action request missing {exc.args[0]}.") from exc
-
-    def _get_agent_state(self, agent_id: int) -> AgentState:
-        try:
-            return self.agents[agent_id]
-        except KeyError as exc:
-            raise ValueError(f"Unknown agent id: {agent_id}") from exc
-
-    def _move_agent(self, agent_state: AgentState, direction: str | None) -> ActionResult:
-        dx, dy = self._direction_delta(direction)
-        agent_state.facing = direction.lower()
-        target = Position(agent_state.position.x + dx, agent_state.position.y + dy)
-
-        if not self._is_inside(target):
-            return self._action_result(False, "Move blocked by world boundary.", agent_state)
-
-        target_value = self.grid[target.y, target.x]
-        if target_value == WALL:
-            return self._action_result(False, "Move blocked by wall.", agent_state)
-        if self._is_agent_id(target_value):
-            return self._action_result(False, "Move blocked by another agent.", agent_state)
-
-        collected_energy = target_value == ENERGY
-        self.grid[agent_state.position.y, agent_state.position.x] = EMPTY
-        self.grid[target.y, target.x] = agent_state.agent_id
-        agent_state.position = target
-
-        if collected_energy:
-            agent_state.energy += 1
-            return self._action_result(True, "Moved and collected energy.", agent_state)
-
-        return self._action_result(True, "Moved.", agent_state)
-
-    def _action_result(
-        self,
-        success: bool,
-        message: str,
-        agent_state: AgentState,
-    ) -> ActionResult:
-        return ActionResult(
-            success=success,
-            message=message,
-            agent_state=agent_state,
-            vision=self.agent_vision(agent_state.agent_id),
+    def add_player(self, sign_up_request):
+        player_id = self.next_player_id
+        self.players[player_id] = Player(
+            name = sign_up_request.name,
+            player_id = player_id,
+            energy = self.starting_energy,
+            location = (0,0)
         )
+        self.next_player_id += 1
 
-    def agent_vision(self, agent_id: int, radius: int = 5) -> list[VisionCell]:
-        if radius <= 0:
-            raise ValueError("Vision radius must be a positive number.")
+        if len(self.players) > 9:
+            self.lobby_ready = True
+        
+        return player_id
 
-        agent_state = self._get_agent_state(agent_id)
-        facing_dx, facing_dy = self._direction_delta(agent_state.facing)
-        visible_cells = []
+    def queue_action(self, action: Action):
+        self.action_queue.put(action)
 
-        for dy in range(-radius, radius + 1):
-            for dx in range(-radius, radius + 1):
-                if dx == 0 and dy == 0:
-                    continue
-                if dx * dx + dy * dy > radius * radius:
-                    continue
-                if dx * facing_dx + dy * facing_dy <= 0:
-                    continue
+    def handle_action(self, action: Action):
+        if action.action_type=='move':
+            player = self.players[action.player_id]
+            x_prev,y_prev = player.location
 
-                position = Position(
-                    x=agent_state.position.x + dx,
-                    y=agent_state.position.y + dy,
-                )
-                if not self._is_inside(position):
-                    continue
+            if action.direction in self.directions.keys():
+                int_direction = self.directions[action.direction]
+            else:
+                # don't move
+                player.energy -= 1
 
-                visible_cells.append(
-                    VisionCell(
-                        x=position.x,
-                        y=position.y,
-                        dx=dx,
-                        dy=dy,
-                        value=int(self.grid[position.y, position.x]),
-                    )
-                )
+            x_new = x_prev + int_direction[0]
+            y_new = y_prev + int_direction[1]
 
-        return visible_cells
+            if x_new < 0 or x_new > self.size-1:
+                # don't move
+                player.energy -= 1
+            elif y_new < 0 or y_new > self.size-1:
+                # don't move
+                player.energy -= 1     
+            elif self.is_empty(self.map[x_new,y_new]):
+                # just move
+                self.map[x_prev][y_prev] = 0
+                self.map[x_new][y_new] = player.player_id
+                player.location = (x_new,y_new)
+                player.energy -= 1
+            elif self.is_energy(self.map[x_new,y_new]):
+                #increment energy
+                self.map[x_prev][y_prev] = 0
+                self.map[x_new][y_new] = player.player_id
+                player.location = (x_new,y_new)
+                player.energy += 20
+                player.energy -= 1
+            elif self.is_wall(self.map[x_new,y_new]):
+                # don't move
+                player.energy -= 1
+            elif self.is_player(self.map[x_new,y_new]):
+                # dont move
+                player.energy -= 1
 
-    def _direction_delta(self, direction: str | None) -> tuple[int, int]:
-        if direction is None:
-            raise ValueError("Direction is required for this action.")
+    def get_player_interface(self, player_id):
+        if not self.running:
+            return {
+                "game_state":"not running",
+                "energy": 0,
+                "location": (0,0),
+                "vision": np.zeros((radius*2,radius*2))
+            }
 
-        directions = {
-            "up": (0, -1),
-            "down": (0, 1),
-            "left": (-1, 0),
-            "right": (1, 0),
+        player = self.players[player_id]
+
+        # get square of radius around player
+        radius = 5
+        x, y = player.location
+        vision = self.map[x-radius:x+radius,y-radius:y+radius]
+        player_interface = {
+            "game_state":"running",
+            "energy": player.energy,
+            "location": player.location,
+            "vision": vision.tolist()
         }
-        try:
-            return directions[direction.lower()]
-        except KeyError as exc:
-            raise ValueError(f"Unknown direction: {direction}") from exc
+        return player_interface
 
-    def _random_empty_positions(self, count: int) -> list[Position]:
-        if count < 0:
-            raise ValueError("Count cannot be negative.")
+    def is_empty(self, cell):
+        return cell == 0
 
-        empty_cells = np.argwhere(self.grid == EMPTY)
-        if count > len(empty_cells):
-            raise ValueError("Not enough empty cells available.")
+    def is_wall(self, cell):
+        return cell == 1
 
-        choices = self.random.sample(range(len(empty_cells)), count)
-        return [Position(x=int(empty_cells[i][1]), y=int(empty_cells[i][0])) for i in choices]
+    def is_energy(self, cell):
+        return cell == 2
 
-    def _wall_growth_start(self, start_new_cluster: bool) -> Position | None:
-        if start_new_cluster:
-            return self._random_interior_empty_position()
+    def is_player(self, cell):
+        return cell >= 100
+    
+    def show_world(self):
+        plt.ion()
+        self.fig, self.ax = plt.subplots()
+        self.img = self.ax.imshow(self._get_rgb_map())
+        self.display_gui = True
 
-        wall_cells = self._interior_wall_positions()
-        self.random.shuffle(wall_cells)
+    def get_world_state(self):
+        return {"map": self.map.tolist()}
 
-        for position in wall_cells:
-            neighbors = self._empty_neighbors(position)
-            if neighbors:
-                return self.random.choice(neighbors)
+    def update_display(self):
+        if self.display_gui:
+            # update canvas
+            self.img.set_data(self._get_rgb_map())
+            self.fig.canvas.flush_events()
+    
+    def update_world_loop(self):
+        while True:
+            if not self.lobby_ready:
+                time.sleep(1/self.tick_rate_hz)
+                continue
+            
+            if not self.running:
+                self._init_map(size=self.size)
+                self._init_walls(num_seed_walls=self.num_seed_walls, max_wall_length=self.max_wall_length)
+                self._init_energy(num_energy=self.num_energy)
+                self._init_players()
+                self.running = True
 
-        return self._random_interior_empty_position()
+                time.sleep(1/self.tick_rate_hz)
+                continue 
 
-    def _interior_wall_positions(self) -> list[Position]:
-        wall_cells = np.argwhere(self.grid == WALL)
-        return [
-            Position(x=int(x), y=int(y))
-            for y, x in wall_cells
-            if not self._is_border_position(int(x), int(y))
-        ]
+            # clear action queue
+            players_moved = {
+                key: False
+                for key in self.players.keys()
+            }
 
-    def _random_interior_empty_position(self) -> Position | None:
-        interior_empty_cells = [
-            Position(x=int(x), y=int(y))
-            for y, x in np.argwhere(self.grid == EMPTY)
-            if not self._is_border_position(int(x), int(y))
-        ]
-        if interior_empty_cells:
-            return self.random.choice(interior_empty_cells)
+            while not self.action_queue.empty():
+                action_batch = []
+                while not self.action_queue.empty():
+                    action_batch.append(self.action_queue.get())
 
-        empty_cells = np.argwhere(self.grid == EMPTY)
-        if len(empty_cells) == 0:
-            return None
+                if action_batch:
+                    for action in action_batch:
+                        if not players_moved[action.player_id]: # move only once per tick
+                            self.handle_action(action)
+                            players_moved[action.player_id] = True
 
-        y, x = self.random.choice(empty_cells)
-        return Position(x=int(x), y=int(y))
+            time.sleep(1/self.tick_rate_hz)
 
-    def _is_border_position(self, x: int, y: int) -> bool:
-        return x == 0 or y == 0 or x == self.width - 1 or y == self.height - 1
+worlds = [World() for _ in range(10)]
 
-    def _next_wall_position(self, current: Position, dx: int, dy: int) -> Position | None:
-        next_position = Position(x=current.x + dx, y=current.y + dy)
-        if self._is_empty(next_position):
-            return next_position
+app = FastAPI()
 
-        neighbors = self._empty_neighbors(current)
-        if not neighbors:
-            return None
+@app.get("/")
+def read_root():
+    return {"Hello": "World"}
 
-        return self.random.choice(neighbors)
+@app.get("/get_world_state") # have to include queyr params like so, GET /get_world_state?world_id=0
+def get_world_state(world_id: int):
+    return {"world_state": worlds[world_id].get_world_state()}
 
-    def _empty_neighbors(self, position: Position) -> list[Position]:
-        neighbors = [
-            Position(position.x + 1, position.y),
-            Position(position.x - 1, position.y),
-            Position(position.x, position.y + 1),
-            Position(position.x, position.y - 1),
-        ]
-        return [neighbor for neighbor in neighbors if self._is_empty(neighbor)]
+@app.get("/get_player_state") # have to include query params like so, GET /get_player_state?world_id=0&player_id=100
+def get_player_state(world_id: int, player_id: int):
+    return worlds[world_id].get_player_interface(player_id)
 
-    def _is_empty(self, position: Position) -> bool:
-        return (
-            self._is_inside(position)
-            and self.grid[position.y, position.x] == EMPTY
-        )
+@app.post("/queue_action")
+def queue_action(action: Action):
+    worlds[action.world_id].queue_action(action)
+    return {"status":"success"}
 
-    def _is_inside(self, position: Position) -> bool:
-        return 0 <= position.x < self.width and 0 <= position.y < self.height
+@app.post("/queue_game")
+def queue_game(sign_up_request: SignUpRequest):
+    for idx, world in enumerate(worlds):
+        if not world.running:
+            player_id = world.add_player(sign_up_request)
+            return {"status":"success", "world_id": idx, "player_id": player_id}
+    return {"status":"failed", "msg":"could not join world"}
 
-    def _is_agent_id(self, value: int) -> bool:
-        return value >= FIRST_AGENT_ID
-
-    def _validate_position(self, x: int, y: int) -> None:
-        if not 0 <= x < self.width or not 0 <= y < self.height:
-            raise ValueError(f"Position ({x}, {y}) is outside the world.")
-
-
-if __name__ == "__main__":
-    world = World(seed=42)
-    world.visualize()
+    
+if __name__=="__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)

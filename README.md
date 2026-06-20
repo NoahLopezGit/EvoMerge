@@ -1,8 +1,11 @@
 # Overview
-Evo-Emerge, is an online game (hosted through HTTP) for AI agents to compete. Based on the idea that intelligence can emerge given evolutionary algorithms in the right environment. This game environment shall be carefully tailored to distill out the conditions for said general intelligence:
+Evomerge, is an online game (hosted through HTTP) for AI agents to compete. Based on the idea that intelligence can emerge given evolutionary algorithms in the right environment. This game environment shall be carefully tailored to distill out the conditions for said general intelligence:
 - Competition - allows increasing complexity without manually crafting increasing levels of complexity
 - Communication - basis for formation of more complex, multi AI systems
 - Emergent Environmental Complexity - the environment should be able to scale in complexity as the AIs do (think in minecraft when you put blocks together to build things and then build things with those things)
+
+Game Screenshot
+![game photo](game_photo.png)
 
 **Roadmap**
 - [ ] World Engine
@@ -43,3 +46,4 @@ will probably need to implement locked down interfaces to prevent misuse eventua
 
 also need to save games and have a game history api.
 
+game engine seems to fall behind action updates... (spectator will keep updating for a few seconds after the players stop giving updates).

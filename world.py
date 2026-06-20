@@ -8,6 +8,7 @@ from fastapi import FastAPI
 import uvicorn
 from pydantic import BaseModel
 from typing import Optional
+import datetime
 
 """
 My World
@@ -28,16 +29,39 @@ class SignUpRequest(BaseModel):
     name: str
 
 class Player():
-    def __init__(self, name, player_id, energy, location):
+    def __init__(self, name, player_id, energy):
         self.player_id = player_id
         self.name = name
         self.energy = energy
+        self.location = (0,0)
+        self.alive = False
+
+    def spawn(self, location):
         self.location = location
-    
+        self.alive = True
+
+    def can_act(self):
+        return self.alive and self.energy > 0
+
+    def spend_energy(self, amount=1):
+        self.energy -= amount
+        if self.energy <= 0:
+            self.energy = 0
+            self.alive = False
+
+    def add_energy(self, amount):
+        self.energy += amount
+
+    def set_location(self, location):
+        self.location = location 
+
 class World():
     def __init__(
-            self, size=100, num_seed_walls=100, max_wall_length=10, num_energy=50, num_players=5, starting_energy=40, tick_rate_hz=10
+            self, world_id, size=100, num_seed_walls=100, max_wall_length=10, num_energy=50, num_players=5, starting_energy=40, tick_rate_hz=10
         ):
+        self.world_id = world_id
+
+        # params
         self.size=size
         self.num_seed_walls=num_seed_walls
         self.max_wall_length=max_wall_length
@@ -45,20 +69,30 @@ class World():
         self.num_players=num_players
         self.starting_energy=starting_energy
         self.tick_rate_hz=tick_rate_hz
+
+        # helpers
         self.directions = {
             "up":[1,0],
             "down":[-1,0],
             "left":[0,-1],
             "right":[0,1]
         }
-        self.map = np.zeros((size,size))
+
+        # players
         self.players = {}
         self.next_player_id = 100
-        self.display_gui = None
-        self.action_queue = Queue()
+
+        # world management
         self.running = False
         self.lobby_ready = False
+        self.action_queue = Queue()
+        self.map = np.zeros((size,size))
+        self.game_history = []
 
+        # misc
+        self.display_gui = None
+
+        # main loop
         Thread(target=self.update_world_loop, daemon=True).start()
         
     def _init_map(self, size=100):
@@ -150,7 +184,7 @@ class World():
             x = random.randint(0,self.size-1)
             y = random.randint(0,self.size-1)
             if self.is_empty(self.map[x][y]):
-                self.players[player_id].location = (x,y)
+                self.players[player_id].spawn((x,y))
                 self.map[x][y] = player_id
                 tries = 0
             else:
@@ -187,7 +221,6 @@ class World():
             name = sign_up_request.name,
             player_id = player_id,
             energy = self.starting_energy,
-            location = (0,0)
         )
         self.next_player_id += 1
 
@@ -197,61 +230,62 @@ class World():
         return player_id
 
     def queue_action(self, action: Action):
-        self.action_queue.put(action)
+        if self.running:
+            self.action_queue.put(action)
+            return True
+        return False
 
     def handle_action(self, action: Action):
         if action.action_type=='move':
-            player = self.players[action.player_id]
-            x_prev,y_prev = player.location
+            self.move_player(action.player_id, action.direction)
 
-            if action.direction in self.directions.keys():
-                int_direction = self.directions[action.direction]
-            else:
-                # don't move
-                player.energy -= 1
+    def move_player(self, player_id: int, direction: str):
+        player = self.players[player_id]
 
-            x_new = x_prev + int_direction[0]
-            y_new = y_prev + int_direction[1]
+        if not player.can_act():
+            return False
 
-            if x_new < 0 or x_new > self.size-1:
-                # don't move
-                player.energy -= 1
-            elif y_new < 0 or y_new > self.size-1:
-                # don't move
-                player.energy -= 1     
-            elif self.is_empty(self.map[x_new,y_new]):
-                # just move
-                self.map[x_prev][y_prev] = 0
-                self.map[x_new][y_new] = player.player_id
-                player.location = (x_new,y_new)
-                player.energy -= 1
-            elif self.is_energy(self.map[x_new,y_new]):
-                #increment energy
-                self.map[x_prev][y_prev] = 0
-                self.map[x_new][y_new] = player.player_id
-                player.location = (x_new,y_new)
-                player.energy += 20
-                player.energy -= 1
-            elif self.is_wall(self.map[x_new,y_new]):
-                # don't move
-                player.energy -= 1
-            elif self.is_player(self.map[x_new,y_new]):
-                # dont move
-                player.energy -= 1
+        if direction not in self.directions:
+            player.spend_energy(1)
+            return False
+
+        dx, dy = self.directions[direction]
+        x_prev, y_prev = player.location
+        x_new, y_new = x_prev + dx, y_prev + dy
+
+        if not self.in_bounds(x_new, y_new):
+            player.spend_energy(1)
+            return False
+
+        target = self.map[x_new][y_new]
+
+        if self.is_wall(target) or self.is_player(target):
+            player.spend_energy(1)
+            return False
+
+        if self.is_energy(target):
+            player.add_energy(20)
+
+        self.map[x_prev][y_prev] = 0
+        self.map[x_new][y_new] = player.player_id
+        player.set_location((x_new, y_new))
+
+        player.spend_energy(1)
+        return True
 
     def get_player_interface(self, player_id):
+        radius = 5
         if not self.running:
             return {
                 "game_state":"not running",
                 "energy": 0,
                 "location": (0,0),
-                "vision": np.zeros((radius*2,radius*2))
+                "vision": np.zeros((radius*2,radius*2)).tolist()
             }
 
         player = self.players[player_id]
 
         # get square of radius around player
-        radius = 5
         x, y = player.location
         vision = self.map[x-radius:x+radius,y-radius:y+radius]
         player_interface = {
@@ -261,6 +295,22 @@ class World():
             "vision": vision.tolist()
         }
         return player_interface
+
+    def end_game(self):
+        # save game
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        np.save(f"games/{self.world_id}_{timestamp}", self.game_history)
+
+        # reset world
+        self.lobby_ready = False
+        self.running = False
+        self.map = np.zeros((self.size,self.size))
+        self.players = {}
+        self.next_player_id = 100
+        self.action_queue = Queue()
+
+    def in_bounds(self, x, y):
+        return 0 <= x < self.size and 0 <= y < self.size
 
     def is_empty(self, cell):
         return cell == 0
@@ -291,8 +341,8 @@ class World():
     
     def update_world_loop(self):
         while True:
+            time.sleep(1/self.tick_rate_hz)
             if not self.lobby_ready:
-                time.sleep(1/self.tick_rate_hz)
                 continue
             
             if not self.running:
@@ -301,9 +351,11 @@ class World():
                 self._init_energy(num_energy=self.num_energy)
                 self._init_players()
                 self.running = True
-
-                time.sleep(1/self.tick_rate_hz)
                 continue 
+
+            if all([not player.alive for player in self.players.values()]): # check if all players are dead
+                self.end_game()
+                continue
 
             # clear action queue
             players_moved = {
@@ -322,9 +374,9 @@ class World():
                             self.handle_action(action)
                             players_moved[action.player_id] = True
 
-            time.sleep(1/self.tick_rate_hz)
+            self.game_history.append(self.map.copy())
 
-worlds = [World() for _ in range(10)]
+worlds = [World(world_id) for world_id in range(10)]
 
 app = FastAPI()
 
@@ -342,15 +394,15 @@ def get_player_state(world_id: int, player_id: int):
 
 @app.post("/queue_action")
 def queue_action(action: Action):
-    worlds[action.world_id].queue_action(action)
-    return {"status":"success"}
+    action_successful = worlds[action.world_id].queue_action(action)
+    return {"status":"success" if action_successful else "failure"}
 
 @app.post("/queue_game")
 def queue_game(sign_up_request: SignUpRequest):
-    for idx, world in enumerate(worlds):
+    for world in worlds:
         if not world.running:
             player_id = world.add_player(sign_up_request)
-            return {"status":"success", "world_id": idx, "player_id": player_id}
+            return {"status":"success", "world_id": world.world_id, "player_id": player_id}
     return {"status":"failed", "msg":"could not join world"}
 
     

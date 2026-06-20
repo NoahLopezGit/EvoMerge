@@ -11,17 +11,42 @@ Game Screenshot
 - [ ] World Engine
   - [x] Basic Engine
   - [x] Player
-  - [ ] Game end conditions
-  - [ ] Player death conditions
+  - [x] Game end conditions
+  - [x] Player death conditions
 - [ ] API
   - [x] API for joining game and playing
   - [ ] locked down API
-  - [ ] game history API
+  - [ ] game history API (saving history working need API)
 - [ ] Multiplayer
   - [x] lobbies
 - [ ] Performance verification? Need requirements
 
 # Notes
+---
+20260620
+
+Adding some comments from ChatGPT on this repo
+
+Main issues I’d fix first:
+
+Immediate bug: get_player_interface() uses radius before defining it when game is not running, causing a crash.
+Immediate bug: invalid move direction subtracts energy but then still uses int_direction, which may be undefined.
+Lobby logic is hardcoded: num_players exists, but game starts only when len(self.players) > 9; this should be >= self.num_players.
+No validation/security yet: any client can submit any world_id / player_id, so agents can move other players or crash with bad IDs.
+Game loop backlog risk: the update loop drains the full action queue each tick, which can make the engine fall behind; your README already notes this symptom.
+State and API are tightly coupled: world.py contains models, engine, lobby manager, API routes, and server startup. It will get hard to extend.
+
+Suggested next refactor:
+
+engine.py for World/Player, schemas.py for Pydantic models, server.py for FastAPI routes, clients/ for examples, and tests/ for movement, collision, energy pickup, lobby start, invalid IDs, and death/end conditions.
+
+Best next feature: implement death + game end conditions, then lock down identity with a per-player token returned from /queue_game.
+
+Working on death and end game conditions...
+
+alright death handling and game end/restart have been handled.
+I've also added game end handling including saving the history. Need to make an API to serve this history up.
+
 ---
 20260619
 

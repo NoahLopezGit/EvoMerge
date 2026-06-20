@@ -1,5 +1,5 @@
 # Overview
-Evomerge, is an online game (hosted through HTTP) for AI agents to compete. Based on the idea that intelligence can emerge given evolutionary algorithms in the right environment. This game environment shall be carefully tailored to distill out the conditions for said general intelligence:
+EvoMerge, is an online game (hosted through HTTP) for AI agents to compete. Based on the idea that intelligence can emerge given evolutionary algorithms in the right environment. This game environment shall be carefully tailored to distill out the conditions for said general intelligence:
 - Competition - allows increasing complexity without manually crafting increasing levels of complexity
 - Communication - basis for formation of more complex, multi AI systems
 - Emergent Environmental Complexity - the environment should be able to scale in complexity as the AIs do (think in minecraft when you put blocks together to build things and then build things with those things)
@@ -17,7 +17,7 @@ Game Screenshot
   - [x] API for joining game and playing
   - [ ] locked down API
   - [ ] game history API
-- [?] Multiplayer
+- [ ] Multiplayer
   - [x] lobbies
 - [ ] Performance verification? Need requirements
 

@@ -9,19 +9,11 @@ import uvicorn
 from pydantic import BaseModel
 from typing import Optional
 import datetime
-
-"""
-My World
-2d grid
-empty cells - 0
-walls - 1 
-energy -2
-players - 100+
-"""
+from uuid import uuid4
 
 class Action(BaseModel):
-    world_id: int
-    player_id : int
+    world_id: str
+    player_id : str
     action_type : str
     direction : Optional[str] = None
 
@@ -29,8 +21,9 @@ class SignUpRequest(BaseModel):
     name: str
 
 class Player():
-    def __init__(self, name, player_id, energy):
+    def __init__(self, name, player_id, player_idx, energy):
         self.player_id = player_id
+        self.player_idx = player_idx
         self.name = name
         self.energy = energy
         self.location = (0,0)
@@ -80,7 +73,7 @@ class World():
 
         # players
         self.players = {}
-        self.next_player_id = 100
+        self.next_player_idx = 100
 
         # world management
         self.running = False
@@ -176,7 +169,7 @@ class World():
 
     def _init_players(self):
         tries = 0
-        for player_id in self.players.keys():
+        for player in self.players.values():
             if tries > 10:
                 print("Error placing more players")
                 break
@@ -184,8 +177,8 @@ class World():
             x = random.randint(0,self.size-1)
             y = random.randint(0,self.size-1)
             if self.is_empty(self.map[x][y]):
-                self.players[player_id].spawn((x,y))
-                self.map[x][y] = player_id
+                player.spawn((x,y))
+                self.map[x][y] = player.player_idx
                 tries = 0
             else:
                 tries += 1
@@ -216,13 +209,14 @@ class World():
         return rgb_map
 
     def add_player(self, sign_up_request):
-        player_id = self.next_player_id
+        player_id = str(uuid4())
         self.players[player_id] = Player(
-            name = sign_up_request.name,
-            player_id = player_id,
-            energy = self.starting_energy,
+            name=sign_up_request.name,
+            player_id=player_id,
+            player_idx=self.next_player_idx,
+            energy=self.starting_energy
         )
-        self.next_player_id += 1
+        self.next_player_idx += 1
 
         if len(self.players) > 9:
             self.lobby_ready = True
@@ -239,7 +233,7 @@ class World():
         if action.action_type=='move':
             self.move_player(action.player_id, action.direction)
 
-    def move_player(self, player_id: int, direction: str):
+    def move_player(self, player_id: str, direction: str):
         player = self.players[player_id]
 
         if not player.can_act():
@@ -267,13 +261,13 @@ class World():
             player.add_energy(20)
 
         self.map[x_prev][y_prev] = 0
-        self.map[x_new][y_new] = player.player_id
+        self.map[x_new][y_new] = player.player_idx
         player.set_location((x_new, y_new))
 
         player.spend_energy(1)
         return True
 
-    def get_player_interface(self, player_id):
+    def get_player_interface(self, player_id: str):
         radius = 5
         if not self.running:
             return {
@@ -304,9 +298,10 @@ class World():
         # reset world
         self.lobby_ready = False
         self.running = False
+        self.game_history = []
         self.map = np.zeros((self.size,self.size))
         self.players = {}
-        self.next_player_id = 100
+        self.next_player_idx = 100
         self.action_queue = Queue()
 
     def in_bounds(self, x, y):
@@ -376,7 +371,10 @@ class World():
 
             self.game_history.append(self.map.copy())
 
-worlds = [World(world_id) for world_id in range(10)]
+worlds = {}
+for _ in range(10):
+    world_id = str(uuid4())
+    worlds[world_id] = World(world_id)
 
 app = FastAPI()
 
@@ -384,12 +382,23 @@ app = FastAPI()
 def read_root():
     return {"Hello": "World"}
 
-@app.get("/get_world_state") # have to include queyr params like so, GET /get_world_state?world_id=0
-def get_world_state(world_id: int):
+@app.get("/get_worlds")
+def get_worlds():
+    world_info_list = {}
+    for world_id, world in worlds.items():
+        world_info_list[world_id] = {
+            "world_id": world.world_id,
+            "status": "Running" if world.running else "Stopped",
+            "players": len(world.players)
+        }
+    return world_info_list
+
+@app.get("/get_world_state") # have to include queyr params like so, GET /get_world_state?world_id=3959d47a-f872-49b0-a8a1-8d1529c57f73
+def get_world_state(world_id: str):
     return {"world_state": worlds[world_id].get_world_state()}
 
-@app.get("/get_player_state") # have to include query params like so, GET /get_player_state?world_id=0&player_id=100
-def get_player_state(world_id: int, player_id: int):
+@app.get("/get_player_state") # have to include query params like so, GET /get_player_state?world_id=3959d47a-f872-49b0-a8a1-8d1529c57f73&player_id=a27a54bd-52cc-4041-9aca-b04fe5ea932f
+def get_player_state(world_id: str, player_id: str):
     return worlds[world_id].get_player_interface(player_id)
 
 @app.post("/queue_action")
@@ -399,12 +408,11 @@ def queue_action(action: Action):
 
 @app.post("/queue_game")
 def queue_game(sign_up_request: SignUpRequest):
-    for world in worlds:
+    for world in worlds.values():
         if not world.running:
             player_id = world.add_player(sign_up_request)
             return {"status":"success", "world_id": world.world_id, "player_id": player_id}
     return {"status":"failed", "msg":"could not join world"}
 
-    
 if __name__=="__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

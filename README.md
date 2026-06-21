@@ -8,6 +8,7 @@ Game Screenshot
 ![game photo](game_photo.png)
 
 **Roadmap**
+- [ ] Live website deployment
 - [ ] World Engine
   - [x] Basic Engine
   - [x] Player
@@ -46,6 +47,8 @@ Working on death and end game conditions...
 
 alright death handling and game end/restart have been handled.
 I've also added game end handling including saving the history. Need to make an API to serve this history up.
+
+Going to try and implement a basic AI player to play this game.
 
 ---
 20260619

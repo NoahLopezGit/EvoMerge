@@ -18,9 +18,12 @@ Game Screenshot
   - [x] API for joining game and playing
   - [ ] locked down API
   - [ ] game history API (saving history working need API)
+  - [x] get worlds interface
+  - [x] UUIDs for worlds and players
 - [ ] Multiplayer
   - [x] lobbies
 - [ ] Performance verification? Need requirements
+- [ ] Basic evolutionary algorithm playing game
 
 # Notes
 ---
